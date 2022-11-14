@@ -61,45 +61,46 @@ class BodyRecognizer
     // Subscribers
     ros::NodeHandle nh_;
     image_transport::ImageTransport it_;
-    image_transport::Subscriber image_sub_;
-    ros::Subscriber openpose_sub_;
+    image_transport::Subscriber image_sub_; 
+    //ros::Subscriber openpose_sub_;
     ros::Subscriber yolo_sub_;
 
     // Publishers
-    image_transport::Publisher image_pub_;
+    image_transport::Publisher raw_image_pub_;
 
     // Variables
     ros_openpose::Frame frame_msg_;
-    depthai_ros_msgs::SpatialDetectionArray detection_msg_;
-    int kp_patch_width_{30};
-    float bp_conf_thresh_{.2};
-    float obj_conf_thresh_{.5};
-    int detection_font_size_{1};
-    const int detection_font_weight_{1};
-    std::string detection_label_;
-    float distance_to_person_;
-    static constexpr int nKeypoints_{25};
+    depthai_ros_msgs::SpatialDetectionArray last_detection_msg_;
     
-    // Feature extraction 
-    static constexpr int nHist_{4};// 4 is the number of feature types (LBP,R,G,B)
-    static constexpr int histSize_{256};
-    static constexpr int histWidth_{512}; 
-    static constexpr int histHeight_{400};
-    bool uniform_ = true, accumulate_ = false;
-    int bin_ = cvRound((double)histWidth_/histSize_);
-    cv::Mat kpImg_;
-    cv::Mat bHist_, gHist_, rHist_, lbpImage_, lbpHist_, grayImg_;
-    cv::Mat rgbHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
-    cv::Mat lbpHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
-    std::vector <cv::Mat> bgrPlanes_; 
+    // int kp_patch_width_{30};
+    // float bp_conf_thresh_{.2};
+    // float obj_conf_thresh_{.5};
+    // int detection_font_size_{1};
+    // const int detection_font_weight_{1};
+    // std::string detection_label_;
+    // float distance_to_person_;
+    // static constexpr int nKeypoints_{25};
+    
+    // // Feature extraction 
+    // static constexpr int nHist_{4};// 4 is the number of feature types (LBP,R,G,B)
+    // static constexpr int histSize_{256};
+    // static constexpr int histWidth_{512}; 
+    // static constexpr int histHeight_{400};
+    // bool uniform_ = true, accumulate_ = false;
+    // int bin_ = cvRound((double)histWidth_/histSize_);
+    // cv::Mat kpImg_;
+    // cv::Mat bHist_, gHist_, rHist_, lbpImage_, lbpHist_, grayImg_;
+    // cv::Mat rgbHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
+    // cv::Mat lbpHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
+    // std::vector <cv::Mat> bgrPlanes_; 
 
-    // Feature vector for each person
-    struct FeatureHistogram{
-        cv::Mat hist = cv::Mat::zeros(1, histSize_*nHist_*nKeypoints_, CV_32F);
-    };
+    // // Feature vector for each person
+    // struct FeatureHistogram{
+    //     cv::Mat hist = cv::Mat::zeros(1, histSize_*nHist_*nKeypoints_, CV_32F);
+    // };
 
-    BodyRecognizer::FeatureHistogram tempFeature_;
-    std::vector<BodyRecognizer::FeatureHistogram> humanFeatures_;
+    // BodyRecognizer::FeatureHistogram tempFeature_;
+    // std::vector<BodyRecognizer::FeatureHistogram> humanFeatures_;
 
 
     public:
@@ -109,10 +110,10 @@ class BodyRecognizer
     {
         // Subscribe to input video feed and publish output video feed
         image_sub_ = it_.subscribe(image_topic, 10, &BodyRecognizer::imageCallback, this);
-        openpose_sub_ = nh_.subscribe(openpose_topic, 10, &BodyRecognizer::openposeCallback, this);
+        //openpose_sub_ = nh_.subscribe(openpose_topic, 10, &BodyRecognizer::openposeCallback, this);
         yolo_sub_ = nh_.subscribe(detection_topic, 10, &BodyRecognizer::yoloDetectionCallback, this);
 
-        image_pub_ = it_.advertise("/image_converter/output_video", 1);
+        raw_image_pub_ = it_.advertise("/image_converter/output_video", 1);
 
         cv::namedWindow(OPENCV_WINDOW);
         cv::namedWindow(HISTOGRAM_WINDOW);
@@ -132,32 +133,32 @@ class BodyRecognizer
 
     // Check if this body part is within a bounding box and above detection threshold
     // TODO also check bounds, fix issue with multiple overlapping bounding boxes
-    bool IsValidBodyPart(const ros_openpose::BodyPart& bp, const depthai_ros_msgs::SpatialDetection& sd) {
-        if (bp.score > bp_conf_thresh_ 
-            && bp.pixel.x < (sd.bbox.center.x + sd.bbox.size_x/2)
-            && bp.pixel.x > (sd.bbox.center.x - sd.bbox.size_x/2)
-            && bp.pixel.y < (sd.bbox.center.y + sd.bbox.size_y/2) 
-            && bp.pixel.y > (sd.bbox.center.y - sd.bbox.size_y/2)) 
-        { return true; }
-        else { return false; } 
-    }
+    // bool IsValidBodyPart(const ros_openpose::BodyPart& bp, const depthai_ros_msgs::SpatialDetection& sd) {
+    //     if (bp.score > bp_conf_thresh_ 
+    //         && bp.pixel.x < (sd.bbox.center.x + sd.bbox.size_x/2)
+    //         && bp.pixel.x > (sd.bbox.center.x - sd.bbox.size_x/2)
+    //         && bp.pixel.y < (sd.bbox.center.y + sd.bbox.size_y/2) 
+    //         && bp.pixel.y > (sd.bbox.center.y - sd.bbox.size_y/2)) 
+    //     { return true; }
+    //     else { return false; } 
+    // }
 
-    bool DetectionIsPerson(const depthai_ros_msgs::SpatialDetection& sd)
-    {
-        if (sd.results[0].score > obj_conf_thresh_ && class_labels[((int)sd.results[0].id)]=="person") {return true;}
-        else {return false;}
-    }
+    // bool DetectionIsPerson(const depthai_ros_msgs::SpatialDetection& sd)
+    // {
+    //     if (sd.results[0].score > obj_conf_thresh_ && class_labels[((int)sd.results[0].id)]=="person") {return true;}
+    //     else {return false;}
+    // }
 
-    void DrawDetectionBox(cv::Mat& image, const depthai_ros_msgs::SpatialDetection& sd, const std::string& label, const float& dist) 
-    {
-        cv::rectangle(image, cv::Point(sd.bbox.center.x + sd.bbox.size_x/2, sd.bbox.center.y + sd.bbox.size_y/2), cv::Point(sd.bbox.center.x - sd.bbox.size_x/2, sd.bbox.center.y - sd.bbox.size_y/2), CV_RGB(0,0,255), 2);
-        cv::putText(image, label + " @ "+std::to_string(dist) , cv::Point(sd.bbox.center.x - sd.bbox.size_x/2, sd.bbox.center.y - sd.bbox.size_y/2 -10),cv::FONT_HERSHEY_PLAIN, detection_font_size_,CV_RGB(0,0,255), detection_font_weight_);
-    }
+    // void DrawDetectionBox(cv::Mat& image, const depthai_ros_msgs::SpatialDetection& sd, const std::string& label, const float& dist) 
+    // {
+    //     cv::rectangle(image, cv::Point(sd.bbox.center.x + sd.bbox.size_x/2, sd.bbox.center.y + sd.bbox.size_y/2), cv::Point(sd.bbox.center.x - sd.bbox.size_x/2, sd.bbox.center.y - sd.bbox.size_y/2), CV_RGB(0,0,255), 2);
+    //     cv::putText(image, label + " @ "+std::to_string(dist) , cv::Point(sd.bbox.center.x - sd.bbox.size_x/2, sd.bbox.center.y - sd.bbox.size_y/2 -10),cv::FONT_HERSHEY_PLAIN, detection_font_size_,CV_RGB(0,0,255), detection_font_weight_);
+    // }
 
-    void DrawBpBox (cv::Mat& image, float& xmin, float& xmax, float& ymin, float& ymax)
-    {
-        cv::rectangle(image, cv::Point(xmax, ymax), cv::Point(xmin, ymin), CV_RGB(0,255,255), 1);
-    }
+    // void DrawBpBox (cv::Mat& image, float& xmin, float& xmax, float& ymin, float& ymax)
+    // {
+    //     cv::rectangle(image, cv::Point(xmax, ymax), cv::Point(xmin, ymin), CV_RGB(0,255,255), 1);
+    // }
 
     // cv::Mat computeLbp(cv::Mat& img, int histSize, int histRange) {
     //     cv::Mat lbpHist, lbpImg, grayImg;
@@ -215,118 +216,122 @@ class BodyRecognizer
 
     void imageCallback(const sensor_msgs::ImageConstPtr& msg)
     {
-        cv_bridge::CvImagePtr cv_ptr;
-        try
-        {
-        cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-        }
-        catch (cv_bridge::Exception& e)
-        {
-        ROS_ERROR("cv_bridge exception: %s", e.what());
-        return;
-        }
-
-        kpImg_ = cv::Mat(cv_ptr->image.size(), cv_ptr->image.type(), Scalar::all(0));
 
 
-        // Draw a box around each detection
-        for (const depthai_ros_msgs::SpatialDetection& detection : detection_msg_.detections)
-        {
+        // cv_bridge::CvImagePtr cv_ptr;
+        // try
+        // {
+        // cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        // }
+        // catch (cv_bridge::Exception& e)
+        // {
+        // ROS_ERROR("cv_bridge exception: %s", e.what());
+        // return;
+        // }
 
-            //detection_label_ = class_labels[((int)detection.results[0].id)];
-            humanFeatures_.clear();
+        // kpImg_ = cv::Mat(cv_ptr->image.size(), cv_ptr->image.type(), Scalar::all(0));
 
-            // Iterate through visual detections
-            if (DetectionIsPerson(detection)) {
 
-                // Compute distance to person (for scaling the rectangle/patches)
-                distance_to_person_ = sqrt(pow(detection.position.x,2) + pow(detection.position.y,2) + pow(detection.position.z,2));
+        // // Draw a box around each detection
+        // for (const depthai_ros_msgs::SpatialDetection& detection : detection_msg_.detections)
+        // {
 
-                if (visualize) { DrawDetectionBox(cv_ptr->image, detection, class_labels[((int)detection.results[0].id)], distance_to_person_); };
+        //     //detection_label_ = class_labels[((int)detection.results[0].id)];
+        //     humanFeatures_.clear();
 
-                // Iterate through OpenPose detections
-                for (auto& person : frame_msg_.persons)
-                {
-                    // for (const ros_openpose::BodyPart body_part : person.bodyParts)
-                    for (int jj = 0; jj < nKeypoints_; jj++)
-                    {
-                        ros_openpose::BodyPart body_part = std::move(person.bodyParts[jj]);
+        //     // Iterate through visual detections
+        //     if (DetectionIsPerson(detection)) {
+
+        //         // Compute distance to person (for scaling the rectangle/patches)
+        //         distance_to_person_ = sqrt(pow(detection.position.x,2) + pow(detection.position.y,2) + pow(detection.position.z,2));
+
+        //         if (visualize) { DrawDetectionBox(cv_ptr->image, detection, class_labels[((int)detection.results[0].id)], distance_to_person_); };
+
+        //         // Iterate through OpenPose detections
+        //         for (auto& person : frame_msg_.persons)
+        //         {
+        //             // for (const ros_openpose::BodyPart body_part : person.bodyParts)
+        //             for (int jj = 0; jj < nKeypoints_; jj++)
+        //             {
+        //                 ros_openpose::BodyPart body_part = std::move(person.bodyParts[jj]);
                        
-                        // Process body part pixels if body part is a valid detection
-                        if (IsValidBodyPart(body_part, detection))
-                        {
-                            // Get bounding box coordinates
-                            std::cout << jj << std::endl;
-                            // TODO account for image boundaries / e.g. check for x >=0, x<= image.cols()
-                            float xmax = std::min((int)(body_part.pixel.x + kp_patch_width_/(2*distance_to_person_)), cv_ptr->image.cols);
-                            float xmin = std::max((int)(body_part.pixel.x - kp_patch_width_/(2*distance_to_person_)), 0);
-                            float ymax = std::min((int)(body_part.pixel.y + kp_patch_width_/(2*distance_to_person_)), cv_ptr->image.rows);
-                            float ymin = std::max((int)(body_part.pixel.y - kp_patch_width_/(2*distance_to_person_)), 0);
-                            std::cout << "body part point: " << body_part.point.x << ", " << body_part.point.y << ", " << body_part.point.z << std::endl; 
-                            std::cout << "xmin " << xmin << std::endl;
-                            std::cout << "xmax " << xmax << std::endl;
-                            std::cout << "ymin " << ymin << std::endl;
-                            std::cout << "ymax " << ymax << std::endl;
+        //                 // Process body part pixels if body part is a valid detection
+        //                 if (IsValidBodyPart(body_part, detection))
+        //                 {
+        //                     // Get bounding box coordinates
+        //                     std::cout << jj << std::endl;
+        //                     // TODO account for image boundaries / e.g. check for x >=0, x<= image.cols()
+        //                     float xmax = std::min((int)(body_part.pixel.x + kp_patch_width_/(2*distance_to_person_)), cv_ptr->image.cols);
+        //                     float xmin = std::max((int)(body_part.pixel.x - kp_patch_width_/(2*distance_to_person_)), 0);
+        //                     float ymax = std::min((int)(body_part.pixel.y + kp_patch_width_/(2*distance_to_person_)), cv_ptr->image.rows);
+        //                     float ymin = std::max((int)(body_part.pixel.y - kp_patch_width_/(2*distance_to_person_)), 0);
+        //                     std::cout << "body part point: " << body_part.point.x << ", " << body_part.point.y << ", " << body_part.point.z << std::endl; 
+        //                     std::cout << "xmin " << xmin << std::endl;
+        //                     std::cout << "xmax " << xmax << std::endl;
+        //                     std::cout << "ymin " << ymin << std::endl;
+        //                     std::cout << "ymax " << ymax << std::endl;
 
-                            cv::Rect bpRect((xmin+xmax)/2, (ymin+ymax)/2, xmax-xmin, ymin+ymax);
+        //                     cv::Rect bpRect((xmin+xmax)/2, (ymin+ymax)/2, xmax-xmin, ymin+ymax);
 
-                            // Draw box around keypoints
-                            if (visualize) { DrawBpBox(cv_ptr->image, xmin, xmax, ymin, ymax); }
+        //                     // Draw box around keypoints
+        //                     if (visualize) { DrawBpBox(cv_ptr->image, xmin, xmax, ymin, ymax); }
 
-                            // Extract keypoint area and display
-                            //if (visualize) { cv_ptr->image(bpRect).copyTo(kpImg_(bpRect)); }
+        //                     // Extract keypoint area and display
+        //                     //if (visualize) { cv_ptr->image(bpRect).copyTo(kpImg_(bpRect)); }
 
 
 
-                        }
+        //                 }
 
-                        // // TODO compute features
-                        // for (std::string feature : features ) {
-                        //     switch (feature)
-                        //     {
-                        //     case "LBP":
-                        //         std::cout << "Processing LBP features" << std::endl;
-                        //         break;
+        //                 // // TODO compute features
+        //                 // for (std::string feature : features ) {
+        //                 //     switch (feature)
+        //                 //     {
+        //                 //     case "LBP":
+        //                 //         std::cout << "Processing LBP features" << std::endl;
+        //                 //         break;
                             
-                        //     case "RGB"
-                        //         std::cout << "Processing LBP features" << std::endl;
-                        //         break;
+        //                 //     case "RGB"
+        //                 //         std::cout << "Processing LBP features" << std::endl;
+        //                 //         break;
 
-                        //     default:
-                        //         std::cout << "Can't find feature" << std::endl;
-                        //         break;
-                        //     }
-                        // }
-                    } // for BodyPart loop
-                } // OpenPose detection loop
-            } // If DetectionIsPerson loop
-        } // For detection in spatial detections loop
+        //                 //     default:
+        //                 //         std::cout << "Can't find feature" << std::endl;
+        //                 //         break;
+        //                 //     }
+        //                 // }
+        //             } // for BodyPart loop
+        //         } // OpenPose detection loop
+        //     } // If DetectionIsPerson loop
+        // } // For detection in spatial detections loop
 
+
+        // VISUALIZE
         // Update Image Window
-        cv::imshow(OPENCV_WINDOW, cv_ptr->image);
-        cv::waitKey(1);
+        // cv::imshow(OPENCV_WINDOW, cv_ptr->image);
+        // cv::waitKey(1);
 
-        cv::imshow(KEYPOINT_WINDOW, kpImg_);
-        cv::waitKey(1);
+        // cv::imshow(KEYPOINT_WINDOW, kpImg_);
+        // cv::waitKey(1);
 
-        // Update color histogram window
-        cv::imshow(HISTOGRAM_WINDOW, rgbHistImage_);
-        cv::waitKey(1);
+        // // Update color histogram window
+        // cv::imshow(HISTOGRAM_WINDOW, rgbHistImage_);
+        // cv::waitKey(1);
 
-        // Update LBP histogram window
-        cv::imshow(LBP_WINDOW, lbpHistImage_);
-        cv::waitKey(1);
+        // // Update LBP histogram window
+        // cv::imshow(LBP_WINDOW, lbpHistImage_);
+        // cv::waitKey(1);
 
-        // Output modified video stream
-        image_pub_.publish(cv_ptr->toImageMsg());
+        // // Output modified video stream
+        // image_pub_.publish(cv_ptr->toImageMsg());
 
     }; // Image callback
 
-    void openposeCallback(const ros_openpose::Frame::ConstPtr& msg)
-    {
-        // Save message for later processing
-        frame_msg_ = (*msg);
-    };
+    // void openposeCallback(const ros_openpose::Frame::ConstPtr& msg)
+    // {
+    //     // Save message for later processing
+    //     frame_msg_ = (*msg);
+    // };
 
     void yoloDetectionCallback(const depthai_ros_msgs::SpatialDetectionArray::ConstPtr& msg)
     {
