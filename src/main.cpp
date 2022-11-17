@@ -22,6 +22,17 @@ enum config_types{
     oakd
 };
 
+enum body_rec_state
+{
+    READY=0,
+    GOT_IMG=1,
+    GOT_DET=2,
+    OP_MSG_SENT=3,
+    OP_MSG_RCVD=4,
+    FEAT_EXTRACTED=5,
+    TIMEOUT=6
+};
+
 const std::vector<std::string> class_labels = {
     "person",        "bicycle",      "car",           "motorbike",     "aeroplane",   "bus",         "train",       "truck",        "boat",
     "traffic light", "fire hydrant", "stop sign",     "parking meter", "bench",       "bird",        "cat",         "dog",          "horse",
@@ -34,9 +45,8 @@ const std::vector<std::string> class_labels = {
     "refrigerator",  "book",         "clock",         "vase",          "scissors",    "teddy bear",  "hair drier",  "toothbrush"};
 
 
-std::string detection_topic{"/yolov4_publisher/color/yolov4_Spatial_detections"};
-std::string image_topic{"/yolov4_publisher/color/image"};
-std::string openpose_topic{"/frame"};
+std::string detection_topic{"yolov4_publisher/color/yolov4_Spatial_detections"};
+std::string image_topic{"yolov4_publisher/color/image"};
 
 bool visualize{true};
 std::vector<std::string> features{"LBP", "RGB"};
@@ -58,11 +68,20 @@ class BodyRecognizer
     PRIVATE MEMBERS
     */
 
+    // Member variables
+    std::string openpose_in_topic_;
+    std::string openpose_out_topic_;
+    float img_proc_timeout_;
+    // bool color_img_recvd_;
+    // bool op_img_sent_;
+    // bool op_img_recvd_;
+    body_rec_state control_state_;
+
     // Subscribers
     ros::NodeHandle nh_;
     image_transport::ImageTransport it_;
     image_transport::Subscriber image_sub_; 
-    //ros::Subscriber openpose_sub_;
+    ros::Subscriber openpose_sub_;
     ros::Subscriber yolo_sub_;
 
     // Publishers
@@ -70,37 +89,43 @@ class BodyRecognizer
 
     // Variables
     ros_openpose::Frame frame_msg_;
+    boost::shared_ptr<ros_openpose::Frame const> frame_ptr_;
     depthai_ros_msgs::SpatialDetectionArray last_detection_msg_;
+    sensor_msgs::Image last_img_;
+
+    // Keypoint parameters
+    cv_bridge::CvImagePtr cv_ptr_;
+    cv::Mat kpImg_;
+
+    int kp_patch_width_{30};
+    float bp_conf_thresh_{.2};
+    float obj_conf_thresh_{.5};
+    int detection_font_size_{1};
+    const int detection_font_weight_{1};
+    std::string detection_label_;
+    float distance_to_det_;
+    static constexpr int nKeypoints_{25};
     
-    // int kp_patch_width_{30};
-    // float bp_conf_thresh_{.2};
-    // float obj_conf_thresh_{.5};
-    // int detection_font_size_{1};
-    // const int detection_font_weight_{1};
-    // std::string detection_label_;
-    // float distance_to_person_;
-    // static constexpr int nKeypoints_{25};
-    
-    // // Feature extraction 
-    // static constexpr int nHist_{4};// 4 is the number of feature types (LBP,R,G,B)
-    // static constexpr int histSize_{256};
-    // static constexpr int histWidth_{512}; 
-    // static constexpr int histHeight_{400};
-    // bool uniform_ = true, accumulate_ = false;
-    // int bin_ = cvRound((double)histWidth_/histSize_);
-    // cv::Mat kpImg_;
+    // // Feature extraction parameters
+    static constexpr int nHist_{4};// 4 is the number of feature types (LBP,R,G,B)
+    static constexpr int histSize_{256};
+    static constexpr int histWidth_{512}; 
+    static constexpr int histHeight_{400};
+    bool uniform_ = true, accumulate_ = false;
+    int bin_ = cvRound((double)histWidth_/histSize_);
     // cv::Mat bHist_, gHist_, rHist_, lbpImage_, lbpHist_, grayImg_;
     // cv::Mat rgbHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
     // cv::Mat lbpHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
     // std::vector <cv::Mat> bgrPlanes_; 
 
     // // Feature vector for each person
-    // struct FeatureHistogram{
-    //     cv::Mat hist = cv::Mat::zeros(1, histSize_*nHist_*nKeypoints_, CV_32F);
-    // };
+    struct FeatureHistogram{
+        cv::Mat hist = cv::Mat::zeros(1, histSize_*nHist_*nKeypoints_, CV_32F);
+    };
 
-    // BodyRecognizer::FeatureHistogram tempFeature_;
-    // std::vector<BodyRecognizer::FeatureHistogram> humanFeatures_;
+    BodyRecognizer::FeatureHistogram tempFeature_;
+    std::vector<BodyRecognizer::FeatureHistogram> humanFeatures_;
+    const uint max_humans_{5};
 
 
     public:
@@ -108,16 +133,27 @@ class BodyRecognizer
     // Default Constructor
     BodyRecognizer() : it_(nh_)
     {
+
+        // Get parameter values and assign to member variables
+        nh_.param<std::string>("openpose_in_topic", openpose_in_topic_, "/image_view/output");
+        nh_.param<std::string>("openpose_out_topic", openpose_out_topic_, "/frame");
+        nh_.param<float>("img_proc_timeout", img_proc_timeout_, 0.25);
+
         // Subscribe to input video feed and publish output video feed
         image_sub_ = it_.subscribe(image_topic, 10, &BodyRecognizer::imageCallback, this);
-        //openpose_sub_ = nh_.subscribe(openpose_topic, 10, &BodyRecognizer::openposeCallback, this);
+        openpose_sub_ = nh_.subscribe(openpose_out_topic_, 10, &BodyRecognizer::openposeCallback, this);
         yolo_sub_ = nh_.subscribe(detection_topic, 10, &BodyRecognizer::yoloDetectionCallback, this);
+        raw_image_pub_ = it_.advertise(openpose_in_topic_, 1);
 
-        raw_image_pub_ = it_.advertise("/image_converter/output_video", 1);
+        // Configure control booleans
+        // color_img_recvd_ = false;
+        // op_img_recvd_ = true;
+        // op_img_sent_ = false;
+        control_state_ = READY;
 
         cv::namedWindow(OPENCV_WINDOW);
-        cv::namedWindow(HISTOGRAM_WINDOW);
-        cv::namedWindow(LBP_WINDOW);
+        cv::namedWindow(FEATURE_HIST_WINDOW);
+        // cv::namedWindow(LBP_WINDOW);
 
     }
 
@@ -143,11 +179,16 @@ class BodyRecognizer
     //     else { return false; } 
     // }
 
-    // bool DetectionIsPerson(const depthai_ros_msgs::SpatialDetection& sd)
-    // {
-    //     if (sd.results[0].score > obj_conf_thresh_ && class_labels[((int)sd.results[0].id)]=="person") {return true;}
-    //     else {return false;}
-    // }
+    bool DetectionIsPerson(const depthai_ros_msgs::SpatialDetection& sd)
+    {
+        if (sd.results[0].score > obj_conf_thresh_ && class_labels[((int)sd.results[0].id)]=="person") {return true;}
+        else {return false;}
+    }
+
+    float DistanceToDetection(const depthai_ros_msgs::SpatialDetection& sd)
+    {
+        return 
+    }
 
     // void DrawDetectionBox(cv::Mat& image, const depthai_ros_msgs::SpatialDetection& sd, const std::string& label, const float& dist) 
     // {
@@ -216,34 +257,130 @@ class BodyRecognizer
 
     void imageCallback(const sensor_msgs::ImageConstPtr& msg)
     {
+        if (control_state_==READY) {
+            // Save message
+            last_img_ = (*msg);
+
+            // Set control flags
+            control_state_ = GOT_IMG;
+
+        } else if (control_state_==GOT_DET) {
+            // Save message
+            last_img_ = (*msg);
+            raw_image_pub_.publish(*msg);
+            control_state_ = OP_MSG_SENT;
+            // std::cout << "OP Message sent from img callback" << std::endl;
+            // std::cout <<  ros::Time::now() - last_img_.header.stamp << std::endl;
+        };
+    }; // Image callback
+
+    void yoloDetectionCallback(const depthai_ros_msgs::SpatialDetectionArray::ConstPtr& msg)
+    {
+        if (control_state_==READY) {
+            // Save detection message
+            last_detection_msg_ = (*msg);
+            control_state_ = GOT_DET;
+            // Processing
+            // std::cout << "Got detection msg" << std::endl;
+            // std::cout << ros::Time::now() - last_img_.header.stamp << std::endl;
+
+        } else if (control_state_==GOT_IMG) {
+
+            // Publish associated image & set booleans
+            last_detection_msg_ = (*msg);
+            raw_image_pub_.publish(last_img_);
+            // color_img_recvd_ = false;
+            // op_img_sent_ = true;
+            control_state_ = OP_MSG_SENT;
+            // std::cout << "OP Message sent from det callback" << std::endl;
+            // std::cout <<  ros::Time::now() - last_img_.header.stamp << std::endl;
+        }
+
+    };
 
 
-        // cv_bridge::CvImagePtr cv_ptr;
-        // try
-        // {
-        // cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-        // }
-        // catch (cv_bridge::Exception& e)
-        // {
-        // ROS_ERROR("cv_bridge exception: %s", e.what());
-        // return;
-        // }
+    void openposeCallback(const ros_openpose::Frame::ConstPtr& msg)
+    {
+        if (control_state_ == OP_MSG_SENT) {
+            // Save message for later processing
+            frame_msg_ = (*msg);
+
+            // Perform processing
+            std::cout << "Got OP msg" << std::endl;
+            std::cout << frame_msg_.header.stamp - last_img_.header.stamp << std::endl;
+
+            // Set boolean flags
+            // op_img_sent_ = false;
+            // op_img_recvd_= true;
+            control_state_ = OP_MSG_RCVD;
+
+            // Extract features
+            extractFeatures();
+
+        }
+
+    };
+
+    void extractFeatures() 
+    {
+        std::cout << "extracting features" << std::endl;
+
+        // Convert ROS message to CV matrix
+        try
+        {
+            cv_ptr_ = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        }
+        catch (cv_bridge::Exception& e)
+        {
+            ROS_ERROR("cv_bridge exception: %s", e.what());
+            return;
+        }
+
+        // Reserve memory for max number of detections
+        humanFeatures_.clear();
+        humanFeatures_.reserve(frame_msg_.persons.size());
+
+
+        // Cycle through each camera detection
+        for (const depthai_ros_msgs::SpatialDetection& detection : detection_msg_.detections)
+        {
+
+            // Compute distance to detection
+            distance_to_det_ = DistanceToDetection(detection);
+
+            // Only process the detection if it's a human and if spatial estimate is valid
+            if (DetectionIsPerson(detection) && distance_to_det_ > 0.0) {
+
+                
+
+            }
+
+        }
+
+        // Assign them to the nearest detection from camera
+
+        // Cycle through each person detected in openpose
+
+        // If a match exists, create a feature vector for this person
+
+        // Compute keypoint regions / bounding boxes
+
+        // Visualize bounding boxes and keypoints, if visualization specified
+        
+        // Form feature vector
+
+
+
+
+
+
+        control_state_ = READY;
+    }
+
+
 
         // kpImg_ = cv::Mat(cv_ptr->image.size(), cv_ptr->image.type(), Scalar::all(0));
 
-
-        // // Draw a box around each detection
-        // for (const depthai_ros_msgs::SpatialDetection& detection : detection_msg_.detections)
-        // {
-
-        //     //detection_label_ = class_labels[((int)detection.results[0].id)];
-        //     humanFeatures_.clear();
-
-        //     // Iterate through visual detections
-        //     if (DetectionIsPerson(detection)) {
-
-        //         // Compute distance to person (for scaling the rectangle/patches)
-        //         distance_to_person_ = sqrt(pow(detection.position.x,2) + pow(detection.position.y,2) + pow(detection.position.z,2));
 
         //         if (visualize) { DrawDetectionBox(cv_ptr->image, detection, class_labels[((int)detection.results[0].id)], distance_to_person_); };
 
@@ -324,20 +461,6 @@ class BodyRecognizer
 
         // // Output modified video stream
         // image_pub_.publish(cv_ptr->toImageMsg());
-
-    }; // Image callback
-
-    // void openposeCallback(const ros_openpose::Frame::ConstPtr& msg)
-    // {
-    //     // Save message for later processing
-    //     frame_msg_ = (*msg);
-    // };
-
-    void yoloDetectionCallback(const depthai_ros_msgs::SpatialDetectionArray::ConstPtr& msg)
-    {
-        // Save message for later processing
-        detection_msg_ = (*msg);
-    };
 
 }; // BodyRecognizer Class
 
