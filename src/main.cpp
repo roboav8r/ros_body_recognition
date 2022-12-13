@@ -12,6 +12,9 @@
 #include "depthai_ros_msgs/SpatialDetection.h"
 #include "ros_openpose/Frame.h"
 #include "ros_openpose/BodyPart.h"
+#include "ros_body_recognition/SpatialFeature.h"
+#include "ros_body_recognition/SpatialFeatureArray.h"
+
 
 #include "lbp.hpp"
 
@@ -63,6 +66,7 @@ const std::map<unsigned int, std::string> POSE_BODY_25_BODY_PARTS = {
 
 std::string detection_topic{"yolov4_publisher/color/yolov4_Spatial_detections"};
 std::string image_topic{"yolov4_publisher/color/image"};
+std::string feat_topic{"spatial_features"};
 
 bool visualize{true};
 //std::vector<std::string> features{"LBP", "RGB"};
@@ -77,12 +81,9 @@ const int vIndex = 5; // value
 static const std::string OPENCV_WINDOW = "Human Detections";
 static const std::string FEAT_HIST_WINDOW = "Feature Histograms";
 //static const std::string DEVEL_WINDOW = "Devel";
-// static const std::string HISTOGRAM_WINDOW = "Color Histogram";
-// static const std::string LBP_WINDOW = "Local Binary Pattern";
-// static const std::string KEYPOINT_WINDOW = "Keypoints";
 
 //static const std::vector<uint> kpIndices_{0,1,2,5,8,9,12}; // Face, chest, shoulders left/right, hip center/left/right
-static const std::vector<uint> kpIndices_{0,1,2,5}; // face, chest, left shoulder, right shoulder
+static const std::vector<uint> kpIndices_{1,2,5}; // chest, left shoulder, right shoulder TODO make this a parameter
 static const int nKeypoints_{kpIndices_.size()};
 
 /*
@@ -111,12 +112,15 @@ class BodyRecognizer
 
     // Publishers
     image_transport::Publisher raw_image_pub_;
+    ros::Publisher feat_pub_;
 
     // Images and messages from ROS
     ros_openpose::Frame frame_msg_;
     boost::shared_ptr<ros_openpose::Frame const> frame_ptr_;
     depthai_ros_msgs::SpatialDetectionArray last_detection_msg_;
     sensor_msgs::Image last_img_;
+    ros_body_recognition::SpatialFeature sf_msg_;
+    ros_body_recognition::SpatialFeatureArray sf_array_msg_;
 
     // Detection-to-openpose association variables
     std::vector<int> validDetections;
@@ -138,8 +142,8 @@ class BodyRecognizer
     double distance_to_det_;
     
     // Feature extraction parameters
-    int nFeat_{6};// 4 is the number of feature types (LBP,R,G,B)
-    int histSize_{56};
+    int nFeat_{6};// number of feature types (R, G, B, H, S, V)
+    int histSize_{4}; // TODO make this a parameter
     int histWidth_{1536}; 
     int histHeight_{400};
     bool uniform_ = true, accumulate_ = false;
@@ -174,6 +178,7 @@ class BodyRecognizer
         openpose_sub_ = nh_.subscribe(openpose_out_topic_, 10, &BodyRecognizer::openposeCallback, this);
         yolo_sub_ = nh_.subscribe(detection_topic, 10, &BodyRecognizer::yoloDetectionCallback, this);
         raw_image_pub_ = it_.advertise(openpose_in_topic_, 1);
+        feat_pub_ = nh_.advertise<ros_body_recognition::SpatialFeatureArray>(feat_topic,1);
 
         // Configure control state
         control_state_ = READY;
@@ -181,8 +186,6 @@ class BodyRecognizer
         cv::namedWindow(OPENCV_WINDOW);
         cv::namedWindow(FEAT_HIST_WINDOW);
         //cv::namedWindow(DEVEL_WINDOW);
-        // cv::namedWindow(LBP_WINDOW);
-
     }
 
     // Default Destructor
@@ -191,7 +194,6 @@ class BodyRecognizer
         cv::destroyWindow(OPENCV_WINDOW);
         cv::destroyWindow(FEAT_HIST_WINDOW);
         //cv::destroyWindow(DEVEL_WINDOW);
-        // cv::destroyWindow(LBP_WINDOW);
     }
 
     // Callbacks / member functions
@@ -284,8 +286,6 @@ class BodyRecognizer
                 DrawBpBox(image, xmin, xmax, ymin, ymax, color); 
             }
         }
-
-
     }
 
 
@@ -401,6 +401,9 @@ class BodyRecognizer
         // std::cout << "Max Values" << std::endl;
         // std::cout << maxVal << std::endl;
 
+        // Create empty ROS message
+        sf_array_msg_.header = last_detection_msg_.header;
+        sf_array_msg_.feature_objects.clear();
 
         for (int match=0; match < validDetections.size(); match++)
         {
@@ -421,12 +424,18 @@ class BodyRecognizer
             float range[] = { 0, 256 }; //the upper boundary is exclusive
             const float* histRange[] = { range };
             
+            // Initialize 
+            sf_msg_ = ros_body_recognition::SpatialFeature();
+            sf_msg_.pose.position.x =  last_detection_msg_.detections[validDetections[match]].position.x;
+            sf_msg_.pose.position.y = -last_detection_msg_.detections[validDetections[match]].position.y;
+            sf_msg_.pose.position.z =  last_detection_msg_.detections[validDetections[match]].position.z;
+
             for (int kp=0; kp < nKeypoints_; kp++)
             {
 
                 if (IsValidBodyPart(person.bodyParts[kpIndices_[kp]]))
                 {
-                    // Compute bounding box
+                    // Compute bounding box pixel locations
                     float xmax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.x + kp_patch_width_/(2*distance_to_det_)), cv_ptr_bgr_->image.cols);
                     float xmin = std::max((int)(person.bodyParts[kpIndices_[kp]].pixel.x - kp_patch_width_/(2*distance_to_det_)), 0);
                     float ymax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.y + kp_patch_width_/(2*distance_to_det_)), cv_ptr_bgr_->image.rows);
@@ -437,7 +446,6 @@ class BodyRecognizer
                     // Compute keypoint region mask
                     cv::Mat mask = cv::Mat::zeros(cv_ptr_bgr_->image.size(), CV_8U);
                     mask(bpRect) = cv::Scalar(255);
-      
 
                     // Find histogram indices of this keypoint
                     cv::Rect bIndices(0,bIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
@@ -490,7 +498,6 @@ class BodyRecognizer
                         int iVal = i + vIndex*histSize_ + kp*nFeat_*histSize_;
 
                         // std::cout << "iBlue: " << iBlue << ", IGrn: " << iGrn << std::endl;
-                        // TODO factor in keypoint index
                         cv::line( featHistImg_, 
                             cv::Point( bin_*(iBlue-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iBlue-1)) ),
                             cv::Point( bin_*(iBlue), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iBlue)) ),
@@ -521,14 +528,22 @@ class BodyRecognizer
 
             } // Keypoint
 
+            // TODO add features to vector
+            sf_msg_.features = tempFeature_;
+
             // Visualization
             if (visualize) { DrawDetectionBox(cv_ptr_bgr_->image, last_detection_msg_.detections[validDetections[match]], color); };
 
+            // Add this human's features to the array
             humanFeatures_.push_back(tempFeature_);
+            sf_array_msg_.feature_objects.push_back(sf_msg_);
 
             // Plot feature histogram
 
         } // SD/OP match
+
+        feat_pub_.publish(sf_array_msg_);
+
 
         // VISUALIZE
         // Update Image Window
@@ -542,26 +557,8 @@ class BodyRecognizer
         }
 
         
-
-
         control_state_ = READY;
     } // extractFeatures
-
-
-        // VISUALIZE
-        // Update Image Window
-        // cv::imshow(OPENCV_WINDOW, cv_ptr_bgr_->image);
-        // cv::waitKey(1);
-
-        // cv::imshow(KEYPOINT_WINDOW, kpImg_);
-        // cv::waitKey(1);
-
-        // // Update LBP histogram window
-        // cv::imshow(LBP_WINDOW, lbpHistImage_);
-        // cv::waitKey(1);
-
-        // // Output modified video stream
-        // image_pub_.publish(cv_ptr->toImageMsg());
 
 }; // BodyRecognizer Class
 
@@ -605,109 +602,3 @@ int main(int argc, char **argv)
     //         cv::Point( bin_*(i), histHeight_ - cvRound(lbpHist_.at<float>(i)) ),
     //         cv::Scalar( 255, 255, 255), 2, 8, 0  );
     // }
-
-
-
-
-
-
-
-    // void ComputeKpFeatures(cv::Mat& image, const ros_openpose::Person& person, float& dist, cv::Mat featHist)
-    // {
-    //     cv::split(image,bgrPlanes_);
-    //     float range[] = { 0, 256 }; //the upper boundary is exclusive
-    //     const float* histRange[] = { range };
-        
-    //     for (int kp=0; kp < nKeypoints_; kp++)
-    //     {
-
-    //         if (IsValidBodyPart(person.bodyParts[kpIndices_[kp]]))
-    //         {
-    //             float xmax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.x + kp_patch_width_/(2*dist)), image.cols);
-    //             float xmin = std::max((int)(person.bodyParts[kpIndices_[kp]].pixel.x - kp_patch_width_/(2*dist)), 0);
-    //             float ymax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.y + kp_patch_width_/(2*dist)), image.rows);
-    //             float ymin = std::max((int)(person.bodyParts[kpIndices_[kp]].pixel.y - kp_patch_width_/(2*dist)), 0);
-    //             cv::Rect bpRect((xmin+xmax)/2, (ymin+ymax)/2, xmax-xmin, ymin+ymax);
-
-    //             // Find histogram indices of this keypoint
-    //             cv::Rect bIndices(0,1*histSize_ + kp*nFeat_*histSize_,histSize_,1);
-
-    //             // Compute each feature for this region
-    //             std::cout << "rows in bgrplanes[]: " << bgrPlanes_[0](bpRect).rows << std::endl;
-    //             std::cout << "cols in bgrplanes[]: " << bgrPlanes_[0](bpRect).cols << std::endl;
-                
-    //             //cv::calcHist(&(bgrPlanes_[0](bpRect)),1,0,cv::Mat(),featHist(bIndices),1,&histSize_,histRange,uniform_,accumulate_); 
-    //             // cv::calcHist(&bgrPlanes_[1],1,0,cv::Mat(),gHist_,1,&histSize_,histRange,uniform_,accumulate_); 
-    //             // cv::calcHist(&bgrPlanes_[2],1,0,cv::Mat(),rHist_,1,&histSize_,histRange,uniform_,accumulate_);
-
-    //             // cv::normalize(bHist_, bHist_, 0, rgbHistImage_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
-    //             // cv::normalize(gHist_, gHist_, 0, rgbHistImage_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
-    //             // cv::normalize(rHist_, rHist_, 0, rgbHistImage_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
-
-
-    //         }
-    //     }
-
-    // }
-
-
-
-
-
-        // kpImg_ = cv::Mat(cv_ptr->image.size(), cv_ptr->image.type(), Scalar::all(0));
-
-        //         // Iterate through OpenPose detections
-        //         for (auto& person : frame_msg_.persons)
-        //         {
-        //             // for (const ros_openpose::BodyPart body_part : person.bodyParts)
-        //             for (int jj = 0; jj < nKeypoints_; jj++)
-        //             {
-        //                 ros_openpose::BodyPart body_part = std::move(person.bodyParts[jj]);
-                       
-        //                 // Process body part pixels if body part is a valid detection
-        //                 if (IsValidBodyPart(body_part, detection))
-        //                 {
-        //                     // Get bounding box coordinates
-        //                     std::cout << jj << std::endl;
-        //                     // TODO account for image boundaries / e.g. check for x >=0, x<= image.cols()
-        //                     float xmax = std::min((int)(body_part.pixel.x + kp_patch_width_/(2*distance_to_person_)), cv_ptr->image.cols);
-        //                     float xmin = std::max((int)(body_part.pixel.x - kp_patch_width_/(2*distance_to_person_)), 0);
-        //                     float ymax = std::min((int)(body_part.pixel.y + kp_patch_width_/(2*distance_to_person_)), cv_ptr->image.rows);
-        //                     float ymin = std::max((int)(body_part.pixel.y - kp_patch_width_/(2*distance_to_person_)), 0);
-        //                     std::cout << "body part point: " << body_part.point.x << ", " << body_part.point.y << ", " << body_part.point.z << std::endl; 
-        //                     std::cout << "xmin " << xmin << std::endl;
-        //                     std::cout << "xmax " << xmax << std::endl;
-        //                     std::cout << "ymin " << ymin << std::endl;
-        //                     std::cout << "ymax " << ymax << std::endl;
-
-        //                     cv::Rect bpRect((xmin+xmax)/2, (ymin+ymax)/2, xmax-xmin, ymin+ymax);
-
-        //                     // Draw box around keypoints
-        //                     if (visualize) { DrawBpBox(cv_ptr->image, xmin, xmax, ymin, ymax); }
-
-        //                     // Extract keypoint area and display
-        //                     //if (visualize) { cv_ptr->image(bpRect).copyTo(kpImg_(bpRect)); }
-
-        //                 }
-
-        //                 // // TODO compute features
-        //                 // for (std::string feature : features ) {
-        //                 //     switch (feature)
-        //                 //     {
-        //                 //     case "LBP":
-        //                 //         std::cout << "Processing LBP features" << std::endl;
-        //                 //         break;
-                            
-        //                 //     case "RGB"
-        //                 //         std::cout << "Processing LBP features" << std::endl;
-        //                 //         break;
-
-        //                 //     default:
-        //                 //         std::cout << "Can't find feature" << std::endl;
-        //                 //         break;
-        //                 //     }
-        //                 // }
-        //             } // for BodyPart loop
-        //         } // OpenPose detection loop
-        //     } // If DetectionIsPerson loop
-        // } // For detection in spatial detections loop
