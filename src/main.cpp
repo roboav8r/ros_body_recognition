@@ -65,21 +65,24 @@ std::string detection_topic{"yolov4_publisher/color/yolov4_Spatial_detections"};
 std::string image_topic{"yolov4_publisher/color/image"};
 
 bool visualize{true};
-std::vector<std::string> features{"LBP", "RGB"};
+//std::vector<std::string> features{"LBP", "RGB"};
 //const int lbpIndex = 0;
 const int rIndex = 2;
 const int gIndex = 1;
 const int bIndex = 0;
+const int hIndex = 3; // hue
+const int sIndex = 4; // saturation
+const int vIndex = 5; // value
 
 static const std::string OPENCV_WINDOW = "Human Detections";
-static const std::string FEATURE_HIST_WINDOW = "Feature Histogram";
-static const std::string DEVEL_WINDOW = "Devel";
+static const std::string FEAT_HIST_WINDOW = "Feature Histograms";
+//static const std::string DEVEL_WINDOW = "Devel";
 // static const std::string HISTOGRAM_WINDOW = "Color Histogram";
 // static const std::string LBP_WINDOW = "Local Binary Pattern";
 // static const std::string KEYPOINT_WINDOW = "Keypoints";
 
 //static const std::vector<uint> kpIndices_{0,1,2,5,8,9,12}; // Face, chest, shoulders left/right, hip center/left/right
-static const std::vector<uint> kpIndices_{1}; // chest
+static const std::vector<uint> kpIndices_{0,1,2,5}; // face, chest, left shoulder, right shoulder
 static const int nKeypoints_{kpIndices_.size()};
 
 /*
@@ -122,7 +125,8 @@ class BodyRecognizer
     Eigen::Vector2i associationIndices_;
 
     // Keypoint parameters
-    cv_bridge::CvImagePtr cv_ptr_;
+    cv_bridge::CvImagePtr cv_ptr_bgr_;
+    cv_bridge::CvImagePtr cv_ptr_hsv_;
     cv::Mat kpImg_;
 
     int kp_patch_width_{30};
@@ -131,26 +135,22 @@ class BodyRecognizer
     int detection_font_size_{1};
     const int detection_font_weight_{1};
     std::string detection_label_;
-    float distance_to_det_;
+    double distance_to_det_;
     
-    // // Feature extraction parameters
-    // static const int nFeat_{3};// 4 is the number of feature types (LBP,R,G,B)
-    // static const int histSize_{16};
-    // static const int histWidth_{512}; 
-    // static const int histHeight_{400};
-    // bool uniform_ = true, accumulate_ = false;
-
-    int nFeat_{3};// 4 is the number of feature types (LBP,R,G,B)
-    int histSize_{16};
-    int histWidth_{512}; 
+    // Feature extraction parameters
+    int nFeat_{6};// 4 is the number of feature types (LBP,R,G,B)
+    int histSize_{56};
+    int histWidth_{1536}; 
     int histHeight_{400};
     bool uniform_ = true, accumulate_ = false;
 
-    int bin_ = cvRound((double)histWidth_/histSize_);
+    int bin_ = cvRound((double)histWidth_/(histSize_*nFeat_*nKeypoints_));
+    cv::Mat featHistImg_;
     // cv::Mat bHist_, gHist_, rHist_, lbpImage_, lbpHist_, grayImg_;
     // cv::Mat rgbHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
     // cv::Mat lbpHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
     std::vector <cv::Mat> bgrPlanes_;
+    std::vector <cv::Mat> hsvPlanes_;
     
     // // Feature vector for each person
     cv::Mat tempFeature_;
@@ -179,8 +179,8 @@ class BodyRecognizer
         control_state_ = READY;
 
         cv::namedWindow(OPENCV_WINDOW);
-        cv::namedWindow(FEATURE_HIST_WINDOW);
-        cv::namedWindow(DEVEL_WINDOW);
+        cv::namedWindow(FEAT_HIST_WINDOW);
+        //cv::namedWindow(DEVEL_WINDOW);
         // cv::namedWindow(LBP_WINDOW);
 
     }
@@ -189,8 +189,8 @@ class BodyRecognizer
     ~BodyRecognizer()
     {
         cv::destroyWindow(OPENCV_WINDOW);
-        cv::destroyWindow(FEATURE_HIST_WINDOW);
-        cv::destroyWindow(DEVEL_WINDOW);
+        cv::destroyWindow(FEAT_HIST_WINDOW);
+        //cv::destroyWindow(DEVEL_WINDOW);
         // cv::destroyWindow(LBP_WINDOW);
     }
 
@@ -208,17 +208,16 @@ class BodyRecognizer
         else {return false;}
     }
 
-    float DistanceToDetection(const depthai_ros_msgs::SpatialDetection& sd)
+    double DistanceToDetection(const depthai_ros_msgs::SpatialDetection& sd)
     {
         return sqrt(pow(sd.position.x,2) + pow(sd.position.y,2) + pow(sd.position.z,2));
     }
 
     void GetValidDetections()
     {
-        
         validDetections.clear();
 
-        for (int ii=1 ; ii < last_detection_msg_.detections.size(); ii++)
+        for (int ii=0 ; ii < last_detection_msg_.detections.size(); ii++)
         {
             // Compute distance to detection
             distance_to_det_ = DistanceToDetection(last_detection_msg_.detections[ii]);
@@ -331,7 +330,7 @@ class BodyRecognizer
             // Save message for later processing
             frame_msg_ = (*msg);
 
-            //std::cout << frame_msg_.header.stamp - last_img_.header.stamp << std::endl;
+            std::cout << frame_msg_.header.stamp - last_img_.header.stamp << std::endl;
 
             control_state_ = OP_MSG_RCVD;
 
@@ -344,12 +343,8 @@ class BodyRecognizer
 
     void extractFeatures() 
     {
-        std::cout << "Extracting features" << std::endl;
-
         // Find out maximum number of people in the scene
         GetValidDetections();
-        std::cout << validDetections.size() << " humans detected by OAK-D" << std::endl;
-        std::cout << frame_msg_.persons.size() << " humans detected by openpose" << std::endl;
         
         maxNumHumans_ = min( validDetections.size(), frame_msg_.persons.size() );
         if ( maxNumHumans_==0 ) // TODO check for this on callback
@@ -362,8 +357,11 @@ class BodyRecognizer
         // Convert ROS message to CV matrix
         try
         {
-            cv_ptr_ = cv_bridge::toCvCopy(last_img_, sensor_msgs::image_encodings::BGR8);
-            cv::split(cv_ptr_->image,bgrPlanes_);
+            cv_ptr_bgr_ = cv_bridge::toCvCopy(last_img_, sensor_msgs::image_encodings::BGR8);
+            cv_ptr_hsv_ = cv_bridge::toCvCopy(last_img_, sensor_msgs::image_encodings::BGR8);
+            cv::cvtColor(cv_ptr_bgr_->image,cv_ptr_hsv_->image, COLOR_BGR2HSV);
+            cv::split(cv_ptr_bgr_->image,bgrPlanes_);
+            cv::split(cv_ptr_hsv_->image,hsvPlanes_);
         }
         catch (cv_bridge::Exception& e)
         {
@@ -383,8 +381,8 @@ class BodyRecognizer
                 associationMatrix_(sd,op) = MatchLikelihood( last_detection_msg_.detections[validDetections[sd]], frame_msg_.persons[op]);
             }
         }
-        std::cout << "Association Matrix: " << std::endl;
-        std::cout << associationMatrix_ << std::endl;
+        // std::cout << "Association Matrix: " << std::endl;
+        // std::cout << associationMatrix_ << std::endl;
 
         // Find match indices
         // TODO consider the general case; currently assumes spatial detections < op detections
@@ -408,20 +406,17 @@ class BodyRecognizer
         {
 
             // Generate unique color for this match
-            cv::Scalar color = CV_RGB(0,0,255);
+            cv::Scalar color = CV_RGB(0,255,255);
 
             // Visualize bounding boxes and keypoints, if visualization specified
             distance_to_det_ = DistanceToDetection(last_detection_msg_.detections[validDetections[match]]);
-            if (visualize) { DrawDetectionBox(cv_ptr_->image, last_detection_msg_.detections[validDetections[match]], color); };
-            //if (visualize) { DrawKeyPoints(cv_ptr_->image, frame_msg_.persons[maxIndex[match]], distance_to_det_); };
-        
+
             // Initialize person
             ros_openpose::Person person = frame_msg_.persons[maxIndex[match]];
 
             // Initialize a feature vector and image for this person
-            tempFeature_ = cv::Mat::zeros(1, histSize_*nFeat_*nKeypoints_, CV_32F);
-            // std::cout<< "rows: " << tempFeature_.hist.rows << std::endl;
-            // std::cout<< "cols: " << tempFeature_.hist.cols << std::endl;
+            tempFeature_ = cv::Mat::zeros(histSize_*nFeat_*nKeypoints_, 1,CV_32F);
+            featHistImg_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
 
             float range[] = { 0, 256 }; //the upper boundary is exclusive
             const float* histRange[] = { range };
@@ -432,48 +427,102 @@ class BodyRecognizer
                 if (IsValidBodyPart(person.bodyParts[kpIndices_[kp]]))
                 {
                     // Compute bounding box
-                    float xmax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.x + kp_patch_width_/(2*distance_to_det_)), cv_ptr_->image.cols);
+                    float xmax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.x + kp_patch_width_/(2*distance_to_det_)), cv_ptr_bgr_->image.cols);
                     float xmin = std::max((int)(person.bodyParts[kpIndices_[kp]].pixel.x - kp_patch_width_/(2*distance_to_det_)), 0);
-                    float ymax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.y + kp_patch_width_/(2*distance_to_det_)), cv_ptr_->image.rows);
+                    float ymax = std::min((int)(person.bodyParts[kpIndices_[kp]].pixel.y + kp_patch_width_/(2*distance_to_det_)), cv_ptr_bgr_->image.rows);
                     float ymin = std::max((int)(person.bodyParts[kpIndices_[kp]].pixel.y - kp_patch_width_/(2*distance_to_det_)), 0);
                     //cv::Rect bpRect((xmin+xmax)/2, (ymin+ymax)/2, xmax-xmin, ymin+ymax);
                     cv::Rect bpRect(xmin, ymin, xmax-xmin, ymax-ymin);
                     
-                    // Compute region mask
-                    cv::Mat mask = cv::Mat::zeros(cv_ptr_->image.size(), CV_8U);
+                    // Compute keypoint region mask
+                    cv::Mat mask = cv::Mat::zeros(cv_ptr_bgr_->image.size(), CV_8U);
                     mask(bpRect) = cv::Scalar(255);
       
 
                     // Find histogram indices of this keypoint
-                    cv::Rect bIndices(0,1*histSize_ + kp*nFeat_*histSize_,histSize_,1);
+                    cv::Rect bIndices(0,bIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
+                    cv::Rect gIndices(0,gIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
+                    cv::Rect rIndices(0,rIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
+                    cv::Rect hIndices(0,hIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
+                    cv::Rect sIndices(0,sIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
+                    cv::Rect vIndices(0,vIndex*histSize_ + kp*nFeat_*histSize_,1,histSize_);
                     // featHist(bIndices)
 
                     // Compute feature histograms of this region
-                    cv::calcHist(&bgrPlanes_[0],1,0,mask,tempFeature_,1,&histSize_,histRange,uniform_,accumulate_); 
-                    // cv::calcHist(&bgrPlanes_[1],1,0,cv::Mat(),gHist_,1,&histSize_,histRange,uniform_,accumulate_); 
+                    cv::calcHist(&bgrPlanes_[0],1,0,mask,tempFeature_(bIndices),1,&histSize_,histRange,uniform_,accumulate_); 
+                    cv::calcHist(&bgrPlanes_[1],1,0,mask,tempFeature_(gIndices),1,&histSize_,histRange,uniform_,accumulate_);
+                    cv::calcHist(&bgrPlanes_[2],1,0,mask,tempFeature_(rIndices),1,&histSize_,histRange,uniform_,accumulate_);
+                    cv::calcHist(&hsvPlanes_[0],1,0,mask,tempFeature_(hIndices),1,&histSize_,histRange,uniform_,accumulate_); 
+                    cv::calcHist(&hsvPlanes_[1],1,0,mask,tempFeature_(sIndices),1,&histSize_,histRange,uniform_,accumulate_);
+                    cv::calcHist(&hsvPlanes_[2],1,0,mask,tempFeature_(vIndices),1,&histSize_,histRange,uniform_,accumulate_); 
                     // cv::calcHist(&bgrPlanes_[2],1,0,cv::Mat(),rHist_,1,&histSize_,histRange,uniform_,accumulate_);
 
-
                     // Compute each feature for this region
-                    // std::cout << "rows in bgrplanes[]: " << bgrPlanes_[0](bpRect).rows << std::endl;
-                    // std::cout << "cols in bgrplanes[]: " << bgrPlanes_[0](bpRect).cols << std::endl;
+                    // std::cout << "rows in tempFeature_: " << tempFeature_.rows << std::endl;
+                    // std::cout << "cols in tempFeature_: " << tempFeature_.cols << std::endl;
                     
-
+                    // TODO normalize by number pf pixels in keypoint patch, result is between 0-1
+                    float kpArea = (xmax-xmin)*(ymax-ymin);
+                    cv::divide(tempFeature_, cv::Scalar(kpArea),tempFeature_,1,-1);
+                    //cv::normalize(tempFeature_, tempFeature_, 0, featHistImg_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
+                    //cv::normalize(tempFeature_, tempFeature_, 0, 256, cv::NORM_MINMAX, -1, cv::Mat() );
+                    
                     // cv::normalize(bHist_, bHist_, 0, rgbHistImage_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
                     // cv::normalize(gHist_, gHist_, 0, rgbHistImage_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
                     // cv::normalize(rHist_, rHist_, 0, rgbHistImage_.rows, cv::NORM_MINMAX, -1, cv::Mat() );
 
+
                     // Draw box around keypoint
-                    DrawBpBox(cv_ptr_->image, xmin, xmax, ymin, ymax, color);
+                    DrawBpBox(cv_ptr_bgr_->image, xmin, xmax, ymin, ymax, color);
                     
-                    if (visualize){
-                        cv::imshow(DEVEL_WINDOW, mask);
-                        cv::waitKey(1);
-                    }      
+                    // if (visualize){
+                    //     cv::imshow(DEVEL_WINDOW, mask);
+                    //     cv::waitKey(1);
+                    // }
+
+                    for( int i = 1; i < histSize_; i++ )
+                    {
+                        int iBlue = i + bIndex*histSize_ + kp*nFeat_*histSize_; // 1-15
+                        int iGrn = i + gIndex*histSize_ + kp*nFeat_*histSize_; // 17-31
+                        int iRed = i + rIndex*histSize_ + kp*nFeat_*histSize_;
+                        int iHue = i + hIndex*histSize_ + kp*nFeat_*histSize_;
+                        int iSat = i + sIndex*histSize_ + kp*nFeat_*histSize_;
+                        int iVal = i + vIndex*histSize_ + kp*nFeat_*histSize_;
+
+                        // std::cout << "iBlue: " << iBlue << ", IGrn: " << iGrn << std::endl;
+                        // TODO factor in keypoint index
+                        cv::line( featHistImg_, 
+                            cv::Point( bin_*(iBlue-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iBlue-1)) ),
+                            cv::Point( bin_*(iBlue), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iBlue)) ),
+                            cv::Scalar( 255, 0, 0), 2, 8, 0  );
+                        cv::line( featHistImg_, 
+                            cv::Point( bin_*(iGrn-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iGrn-1)) ),
+                            cv::Point( bin_*(iGrn), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iGrn)) ),
+                            cv::Scalar( 0, 255, 0), 2, 8, 0  );
+                        cv::line( featHistImg_, 
+                            cv::Point( bin_*(iRed-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iRed-1)) ),
+                            cv::Point( bin_*(iRed), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iRed)) ),
+                            cv::Scalar( 0, 0, 255), 2, 8, 0  );
+                        cv::line( featHistImg_, 
+                            cv::Point( bin_*(iHue-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iHue-1)) ),
+                            cv::Point( bin_*(iHue), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iHue)) ),
+                            cv::Scalar( 255, 255, 0), 2, 8, 0  );
+                        cv::line( featHistImg_, 
+                            cv::Point( bin_*(iSat-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iSat-1)) ),
+                            cv::Point( bin_*(iSat), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iSat)) ),
+                            cv::Scalar( 0, 255, 255), 2, 8, 0  );
+                        cv::line( featHistImg_, 
+                            cv::Point( bin_*(iVal-1), histWidth_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iVal-1)) ),
+                            cv::Point( bin_*(iVal), histHeight_ - cvRound(featHistImg_.rows*tempFeature_.at<float>(iVal)) ),
+                            cv::Scalar( 255, 0, 255), 2, 8, 0  );
+                    }
 
                 } // keypoint valid
 
             } // Keypoint
+
+            // Visualization
+            if (visualize) { DrawDetectionBox(cv_ptr_bgr_->image, last_detection_msg_.detections[validDetections[match]], color); };
 
             humanFeatures_.push_back(tempFeature_);
 
@@ -484,9 +533,15 @@ class BodyRecognizer
         // VISUALIZE
         // Update Image Window
         if (visualize){
-            cv::imshow(OPENCV_WINDOW, cv_ptr_->image);
+            cv::imshow(OPENCV_WINDOW, cv_ptr_bgr_->image);
+            cv::waitKey(1);
+
+            // Update feature histogram window
+            cv::imshow(FEAT_HIST_WINDOW, featHistImg_);
             cv::waitKey(1);
         }
+
+        
 
 
         control_state_ = READY;
@@ -495,14 +550,10 @@ class BodyRecognizer
 
         // VISUALIZE
         // Update Image Window
-        // cv::imshow(OPENCV_WINDOW, cv_ptr_->image);
+        // cv::imshow(OPENCV_WINDOW, cv_ptr_bgr_->image);
         // cv::waitKey(1);
 
         // cv::imshow(KEYPOINT_WINDOW, kpImg_);
-        // cv::waitKey(1);
-
-        // // Update color histogram window
-        // cv::imshow(HISTOGRAM_WINDOW, rgbHistImage_);
         // cv::waitKey(1);
 
         // // Update LBP histogram window
@@ -559,19 +610,7 @@ int main(int argc, char **argv)
 
 
 
-    // rgbHistImage_ = cv::Mat( histHeight_, histWidth_, CV_8UC3, cv::Scalar(0,0,0) );
-    // for( int i = 1; i < histSize_; i++ )
-    // {
-    //     cv::line( rgbHistImage_, cv::Point( bin_*(i-1), histWidth_ - cvRound(bHist_.at<float>(i-1)) ),
-    //         cv::Point( bin_*(i), histHeight_ - cvRound(bHist_.at<float>(i)) ),
-    //         cv::Scalar( 255, 0, 0), 2, 8, 0  );
-    //     cv::line( rgbHistImage_, cv::Point( bin_*(i-1), histWidth_ - cvRound(gHist_.at<float>(i-1)) ),
-    //         cv::Point( bin_*(i), histHeight_ - cvRound(gHist_.at<float>(i)) ),
-    //         cv::Scalar( 0, 255, 0), 2, 8, 0  );
-    //     cv::line( rgbHistImage_, cv::Point( bin_*(i-1), histWidth_ - cvRound(rHist_.at<float>(i-1)) ),
-    //         cv::Point( bin_*(i), histHeight_ - cvRound(rHist_.at<float>(i)) ),
-    //         cv::Scalar( 0, 0, 255), 2, 8, 0  );
-    // }
+
 
     // void ComputeKpFeatures(cv::Mat& image, const ros_openpose::Person& person, float& dist, cv::Mat featHist)
     // {
