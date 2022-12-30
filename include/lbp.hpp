@@ -4,7 +4,7 @@
 //! \author philipp <bytefish[at]gmx[dot]de>
 //! \copyright BSD, see LICENSE.
 
-#include <cv.h>
+#include <opencv2/core.hpp>
 #include <limits>
 
 using namespace cv;
