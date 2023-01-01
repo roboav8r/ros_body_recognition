@@ -84,7 +84,7 @@ static const std::string FEAT_HIST_WINDOW = "Feature Histograms";
 
 //static const std::vector<uint> kpIndices_{0,1,2,5,8,9,12}; // Face, chest, shoulders left/right, hip center/left/right
 static const std::vector<uint> kpIndices_{1,2,5}; // chest, left shoulder, right shoulder TODO make this a parameter
-static const int nKeypoints_{kpIndices_.size()};
+static const size_t nKeypoints_{kpIndices_.size()};
 
 /*
 DEFINE BODY RECOGNITION CLASS
