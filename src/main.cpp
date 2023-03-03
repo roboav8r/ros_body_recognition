@@ -303,9 +303,9 @@ class BodyRecognizer
             last_img_ = (*msg);
             raw_image_pub_.publish(*msg);
             control_state_ = OP_MSG_SENT;
-        } else if (control_state_==OP_MSG_SENT ) {
-            raw_image_pub_.publish(last_img_);
-        };
+        }; // else if (control_state_==OP_MSG_SENT ) {
+        //     raw_image_pub_.publish(last_img_);
+        // };
     }; // Image callback
 
     void yoloDetectionCallback(const depthai_ros_msgs::SpatialDetectionArray::ConstPtr& msg)
@@ -321,9 +321,9 @@ class BodyRecognizer
             last_detection_msg_ = (*msg);
             raw_image_pub_.publish(last_img_);
             control_state_ = OP_MSG_SENT;
-        } else if (control_state_==OP_MSG_SENT ) {
-            raw_image_pub_.publish(last_img_);
-        };
+        };// else if (control_state_==OP_MSG_SENT ) {
+        //     raw_image_pub_.publish(last_img_);
+        // };
 
     };
 
